@@ -1,0 +1,170 @@
+name: Build Nezha Kernel (SM8850 · KernelSU + SUSFS)
+
+# Standalone GKI build for Xiaomi 17 Ultra (nezha / mi17_sm8850, android16-6.12).
+# Integrates THIS fork of KernelSU (cklivn-hash/KernelSU, susfs branch, manual-hook
+# SUSFS-compatible mode) into the SM8850 GKI kernel source and packs an AnyKernel3 zip.
+#
+# Trigger it manually from the Actions tab (Run workflow). First run is expected to
+# surface compile errors we fix iteratively from the logs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Kernel source repo (owner/name)"
+        default: "YuzakiKokuban/android_kernel_xiaomi_sm8850"
+        required: true
+      kernel_branch:
+        description: "Kernel source branch"
+        default: "main"
+        required: true
+      ksu_branch:
+        description: "KernelSU branch in this fork to integrate"
+        default: "susfs"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ARCH: arm64
+      KSU_FORK_RAW: "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.inputs.ksu_branch }}"
+    steps:
+      - name: Checkout this KernelSU fork
+        uses: actions/checkout@v4
+        with:
+          path: KernelSU_fork
+          fetch-depth: 1
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget zip unzip bc bison flex libssl-dev \
+            build-essential python3 python3-pip ca-certificates \
+            libelf-dev cpio rsync kmod
+
+      - name: Download toolchain (Clang r536225 + build-tools + Rust + bindgen)
+        run: |
+          set -eux
+          TC="$HOME/toolchain"
+          mkdir -p "$TC/clang" "$TC/build-tools" "$TC/rust" "$TC/bindgen"
+          base="https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225"
+          wget -q "$base/clang-r536225.zip"  -O /tmp/clang.zip
+          wget -q "$base/build-tools.zip"    -O /tmp/build-tools.zip
+          wget -q "$base/rust.zip"           -O /tmp/rust.zip
+          unzip -q /tmp/clang.zip       -d "$TC/clang"
+          unzip -q /tmp/build-tools.zip -d "$TC/build-tools"
+          unzip -q /tmp/rust.zip        -d "$TC/rust"
+          # bindgen 0.69.5 (prebuilt CLI)
+          wget -q "https://github.com/rust-lang/rust-bindgen/releases/download/v0.69.5/bindgen-cli-x86_64-unknown-linux-gnu.tar.xz" -O /tmp/bindgen.tar.xz
+          tar -xf /tmp/bindgen.tar.xz -C "$TC/bindgen" --strip-components=1 || tar -xf /tmp/bindgen.tar.xz -C "$TC/bindgen"
+          echo "Toolchain layout:"; ls -la "$TC"/*/ | head -n 60
+
+      - name: Clone kernel source
+        run: |
+          set -eux
+          git clone --depth=1 \
+            -b "${{ github.event.inputs.kernel_branch }}" \
+            "https://github.com/${{ github.event.inputs.kernel_repo }}.git" kernel
+          ls kernel
+
+      - name: Integrate KernelSU (this fork, susfs branch)
+        working-directory: kernel
+        run: |
+          set -eux
+          # Uses the fork's own setup.sh: symlinks drivers/kernelsu and wires Makefile/Kconfig.
+          curl -LSs "${KSU_FORK_RAW}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_branch }}"
+          echo "--- KernelSU version ---"
+          (cd KernelSU && git log -1 --oneline) || true
+          grep -R "kernelsu" drivers/Makefile drivers/Kconfig || true
+
+      - name: Configure (gki_defconfig + KSU/SUSFS options)
+        working-directory: kernel
+        run: |
+          set -eux
+          TC="$HOME/toolchain"
+          export PATH="$TC/clang/bin:$TC/build-tools/bin:$TC/rust/bin:$TC/bindgen:$PATH"
+          MAKE="make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1"
+          $MAKE gki_defconfig
+          # Enable KernelSU + SUSFS. Options that don't exist are ignored by olddefconfig.
+          CFG="scripts/config --file out/.config"
+          $CFG -e KSU || true
+          for o in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT \
+                   KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+                   KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT KSU_SUSFS_SUS_KSTAT \
+                   KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+                   KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG \
+                   KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                   KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT; do
+            $CFG -e "$o" || true
+          done
+          $MAKE olddefconfig
+          echo "--- KSU/SUSFS in final .config ---"
+          grep -E "CONFIG_KSU" out/.config || echo "WARNING: no CONFIG_KSU in .config"
+
+      - name: Build kernel Image
+        working-directory: kernel
+        run: |
+          set -eux
+          TC="$HOME/toolchain"
+          export PATH="$TC/clang/bin:$TC/build-tools/bin:$TC/rust/bin:$TC/bindgen:$PATH"
+          clang --version | head -n1
+          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image
+          ls -la out/arch/arm64/boot/
+
+      - name: Package AnyKernel3 zip (nezha)
+        run: |
+          set -eux
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          rm -f AnyKernel3/anykernel.sh
+          cat > AnyKernel3/anykernel.sh <<'AK'
+          ### AnyKernel3 - Xiaomi 17 Ultra (nezha) KernelSU+SUSFS
+          properties() { '
+          kernel.string=Xiaomi17-nezha-KernelSU-SUSFS
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=nezha
+          device.name2=pudding
+          device.name3=pandora
+          device.name4=popsicle
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          block=/dev/block/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          AK
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+          cd AnyKernel3
+          ZIP="Mi17_Kernel_nezha_KernelSU_SUSFS_$(date +%Y%m%d_%H%M).zip"
+          zip -r9 "../$ZIP" . -x ".git/*" "*.zip"
+          echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Upload AnyKernel3 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+      - name: Upload kernel Image (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-nezha
+          path: kernel/out/arch/arm64/boot/Image
+          if-no-files-found: warn
