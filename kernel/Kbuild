@@ -73,6 +73,13 @@ endif
 
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
 
+# Robust fallback: resolve this Kbuild's real directory (follows the
+# drivers/kernelsu symlink back to the fork) so quoted includes like
+# "klog.h" and "uapi/app_profile.h" resolve regardless of how kbuild
+# computes $(src)/$(srctree) for in-tree builds.
+KSU_SELF_DIR := $(patsubst %/,%,$(dir $(realpath $(lastword $(MAKEFILE_LIST)))))
+ccflags-y += -I$(KSU_SELF_DIR) -I$(KSU_SELF_DIR)/include
+
 # preinit runner: a static nolibc binary embedded into kernelsu, see preinit/.
 # It is built against the installed UAPI headers of the target kernel
 # (CONFIG_HEADERS_INSTALL, enabled by gki_defconfig).
