@@ -72,6 +72,9 @@ endif
 endif
 
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
+# The shared UAPI headers live in the repo root (../uapi relative to kernel/),
+# so add the KernelSU repo root to the include search path for "uapi/*.h".
+ccflags-y += -I$(realpath $(KSU_KERNEL_DIR)/..)
 
 # preinit runner: a static nolibc binary embedded into kernelsu, see preinit/.
 # It is built against the installed UAPI headers of the target kernel
