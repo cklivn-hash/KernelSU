@@ -48,7 +48,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git curl wget zip unzip bc bison flex libssl-dev \
             build-essential python3 python3-pip ca-certificates \
-            libelf-dev cpio rsync kmod
+            libelf-dev libdw-dev elfutils zlib1g-dev libzstd-dev \
+            cpio rsync kmod
 
       - name: Download toolchain (Clang r536225 + build-tools + Rust + bindgen)
         run: |
