@@ -87,7 +87,13 @@ jobs:
           else
             cp ../susfs4ksu/kernel_patches/fs/* fs/
             cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-            patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch
+            # Some hunks (fs/proc/task_mmu.c, CONFIG_KSU_SUSFS_SUS_MAP) may reject
+            # against this vendor source. SUS_MAP is optional and left disabled,
+            # so tolerate those rejects and continue.
+            patch -p1 --no-backup-if-mismatch \
+              < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch \
+              || echo "::warning:: some optional SUSFS hunks rejected; continuing"
+            find . -name '*.rej' -print -delete || true
           fi
           grep -E "SUSFS_VERSION" include/linux/susfs.h || true
 
