@@ -421,15 +421,17 @@ static int string_to_context_struct(struct policydb *pol, struct policydb *orig_
     struct role_datum *role, *orig_role;
     struct type_datum *typdatum, *orig_typdatum;
     struct user_datum *usrdatum, *orig_usrdatum;
-    char *scontextp, *p, oldc;
+    char *scontextp, *p, oldc, *user_str, *role_str;
     bool orig_valid = true;
     int rc = -EINVAL, orig_rc = -EINVAL;
 
     context_init(ctx);
     context_init(orig_ctx);
 
-    // split fields once
-    // look up both policies
+    // Resolve every field in the backup policy first and fail before touching
+    // the live policy, so contexts rejected by the backup policy cost the same
+    // as on a stock kernel. Live lookups only run once the backup parse of
+    // user, role and type has succeeded.
     scontextp = scontext;
 
     /* Extract the user. */
@@ -443,15 +445,10 @@ static int string_to_context_struct(struct policydb *pol, struct policydb *orig_
     *p++ = 0;
 
     usrdatum = symtab_search(&pol->p_users, scontextp);
-    orig_usrdatum = symtab_search(&orig_pol->p_users, scontextp);
     if (!usrdatum)
         goto out;
-
     ctx->user = usrdatum->value;
-    if (orig_usrdatum)
-        orig_ctx->user = orig_usrdatum->value;
-    else
-        orig_valid = false;
+    user_str = scontextp;
 
     /* Extract role. */
     scontextp = p;
@@ -464,14 +461,10 @@ static int string_to_context_struct(struct policydb *pol, struct policydb *orig_
     *p++ = 0;
 
     role = symtab_search(&pol->p_roles, scontextp);
-    orig_role = symtab_search(&orig_pol->p_roles, scontextp);
     if (!role)
         goto out;
     ctx->role = role->value;
-    if (orig_role)
-        orig_ctx->role = orig_role->value;
-    else
-        orig_valid = false;
+    role_str = scontextp;
 
     /* Extract type. */
     scontextp = p;
@@ -481,11 +474,24 @@ static int string_to_context_struct(struct policydb *pol, struct policydb *orig_
     *p++ = 0;
 
     typdatum = symtab_search(&pol->p_types, scontextp);
-    orig_typdatum = symtab_search(&orig_pol->p_types, scontextp);
     if (!typdatum || typdatum->attribute)
         goto out;
-
     ctx->type = typdatum->value;
+
+    // backup user, role and type are valid: look up the same names in live policy
+    orig_usrdatum = symtab_search(&orig_pol->p_users, user_str);
+    if (orig_usrdatum)
+        orig_ctx->user = orig_usrdatum->value;
+    else
+        orig_valid = false;
+
+    orig_role = symtab_search(&orig_pol->p_roles, role_str);
+    if (orig_role)
+        orig_ctx->role = orig_role->value;
+    else
+        orig_valid = false;
+
+    orig_typdatum = symtab_search(&orig_pol->p_types, scontextp);
     if (orig_typdatum && !orig_typdatum->attribute)
         orig_ctx->type = orig_typdatum->value;
     else
